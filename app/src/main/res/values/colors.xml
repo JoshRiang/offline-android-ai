@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Brand colors mirroring ui.theme.ColorKt for legacy views / launcher. -->
+    <color name="slm_green">#2E7D32</color>
+    <color name="slm_green_light">#81C784</color>
+    <color name="slm_teal">#00695C</color>
+    <color name="user_bubble_light">#DFF3E4</color>
+    <color name="user_bubble_dark">#1B4332</color>
+    <color name="status_ready">#2E7D32</color>
+    <color name="status_busy">#F9A825</color>
+    <color name="status_error">#C62828</color>
+    <color name="ic_launcher_background">#2E7D32</color>
+</resources>

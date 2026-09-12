@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SLM Chat</string>
+    <string name="action_settings">Settings</string>
+    <string name="action_new_chat">New chat</string>
+    <string name="cd_conversations">Conversations</string>
+    <string name="cd_back">Back</string>
+    <string name="cd_send">Send message</string>
+    <string name="cd_stop">Stop generating</string>
+    <string name="hint_message">Message the on-device model…</string>
+    <string name="hint_download_first">Download a model to start…</string>
+    <string name="empty_chat_ready">Say hello to your on-device model.\nEverything stays on this phone.</string>
+    <string name="empty_chat_download">Download the model to start chatting.\nInference runs fully offline afterwards.</string>
+</resources>
