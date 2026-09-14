@@ -122,6 +122,7 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
                     activeConfig = config.copy(maxTokens = effectiveMaxTokens)
                     loadedModelId = modelId
                     Log.i(TAG, "load: ready model=$modelId")
+                    Unit
                 }
             }
         }
