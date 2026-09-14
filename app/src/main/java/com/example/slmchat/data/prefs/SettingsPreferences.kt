@@ -19,7 +19,8 @@ data class AppSettings(
     val temperature: Float = 0.7f,
     val topK: Int = 40,
     val topP: Float = 0.9f,
-    val maxTokens: Int = 1024,
+    // TOTAL context window (prompt + output) for MediaPipe. TinyLlama ctx 2048.
+    val maxTokens: Int = 2048,
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
     val useGpu: Boolean = true,
     /** Optional user-supplied direct download URL overriding the catalog URL. */
@@ -51,7 +52,7 @@ class SettingsPreferences(private val context: Context) {
             temperature = prefs[Keys.TEMPERATURE] ?: 0.7f,
             topK = prefs[Keys.TOP_K] ?: 40,
             topP = prefs[Keys.TOP_P] ?: 0.9f,
-            maxTokens = prefs[Keys.MAX_TOKENS] ?: 1024,
+            maxTokens = prefs[Keys.MAX_TOKENS] ?: 2048,
             systemPrompt = prefs[Keys.SYSTEM_PROMPT]
                 ?: AppSettings.DEFAULT_SYSTEM_PROMPT,
             useGpu = prefs[Keys.USE_GPU] ?: true,

@@ -171,7 +171,7 @@ fun SettingsScreen(
                 Column(modifier = Modifier.weight(1f)) {
                     Text("Use GPU", style = MaterialTheme.typography.bodyLarge)
                     Text(
-                        "Falls back to CPU where unsupported.",
+                        "Forced to CPU on Exynos/Mali (e.g. S21 FE) — GPU delegate crashes natively there.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
