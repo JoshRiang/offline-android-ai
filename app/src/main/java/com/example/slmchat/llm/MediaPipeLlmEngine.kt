@@ -3,13 +3,20 @@ package com.example.slmchat.llm
 import android.content.Context
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.channels.trySendBlocking
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.io.File
 
 /**
@@ -51,7 +58,19 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
                         // Older AAR without Backend selection — default backend is fine.
                     }
                     val options = optionsBuilder.build()
-                    inference = LlmInference.createFromOptions(appContext, options)
+                    // GPU delegate can fail on emulators / x86 / low-RAM devices
+                    // while still returning a non-null LlmInference that then
+                    // generates empty output. Retry on CPU before surfacing error.
+                    inference = try {
+                        LlmInference.createFromOptions(appContext, options)
+                    } catch (e: Exception) {
+                        if (!config.useGpu) throw e
+                        val cpuOptions = LlmInference.LlmInferenceOptions.builder()
+                            .setModelPath(modelFile.absolutePath)
+                            .setMaxTokens(config.maxTokens)
+                            .build()
+                        LlmInference.createFromOptions(appContext, cpuOptions)
+                    }
                     activeConfig = config
                     loadedModelId = modelId
                 }
@@ -71,64 +90,111 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
 
     override fun generateStreaming(prompt: String, history: List<Pair<String, String>>): Flow<String> =
         callbackFlow {
-            val llm = inference ?: run {
-                close(IllegalStateException("Engine not loaded"))
-                return@callbackFlow
+            // Snapshot under lock so a concurrent load() can't swap inference mid-stream.
+            // MediaPipe allows only one active generation per LlmInference.
+            val llm: LlmInference
+            val fullPrompt: String
+            val config: LlmConfig
+            mutex.withLock {
+                llm = inference ?: run {
+                    close(IllegalStateException("Engine not loaded"))
+                    return@callbackFlow
+                }
+                config = activeConfig
+                fullPrompt = buildPrompt(prompt, history, config.systemPrompt)
             }
-            val fullPrompt = buildPrompt(prompt, history, activeConfig.systemPrompt)
-            val config = activeConfig
 
-            withContext(Dispatchers.IO) {
-                // Session-based async streaming first; direct async as fallback.
-                val sessionResult = runCatching {
+            val job = launch(Dispatchers.IO) {
+                var session: LlmInferenceSession? = null
+                try {
                     val sessionOptions = LlmInferenceSession.LlmInferenceSessionOptions.builder()
                         .setTemperature(config.temperature)
                         .setTopK(config.topK)
                         .setTopP(config.topP)
                         .build()
-                    val session = LlmInferenceSession.createFromOptions(llm, sessionOptions)
-                    try {
-                        session.addQueryChunk(fullPrompt)
-                        var previous = ""
-                        val done = kotlinx.coroutines.CompletableDeferred<Unit>()
-                        session.generateResponseAsync { partial, finished ->
-                            // Listener form: (partialResult: String, done: Boolean)
-                            val text = partial ?: ""
-                            val delta = when {
-                                text.startsWith(previous) -> text.substring(previous.length)
-                                else -> text
-                            }
-                            previous = text
-                            if (delta.isNotEmpty()) trySend(delta)
-                            if (finished) done.complete(Unit)
+                    session = LlmInferenceSession.createFromOptions(llm, sessionOptions)
+                    session.addQueryChunk(fullPrompt)
+
+                    // NOTE (tasks-genai 0.10.27, verified against AOSP source):
+                    // ProgressListener.run(partialResult, done) receives the
+                    // *delta* for this callback, NOT the accumulated transcript.
+                    // Do NOT diff against previous text — just emit it.
+                    // The returned ListenableFuture must be awaited: on native
+                    // failure the listener never gets done=true, so awaiting
+                    // only a CompletableDeferred hangs silently -> empty flow.
+                    val done = CompletableDeferred<Unit>()
+                    val accumulated = StringBuilder()
+                    val future = session.generateResponseAsync { partial, finished ->
+                        val delta = partial ?: ""
+                        if (delta.isNotEmpty()) {
+                            accumulated.append(delta)
+                            // trySend() drops under backpressure (callbackFlow
+                            // default capacity is 64); blocking send never drops.
+                            trySendBlocking(delta)
                         }
-                        // Some AAR variants deliver via ResultListener at construction;
-                        // if generateResponseAsync returned without callback support the
-                        // deferred still completes through the listener above.
-                        runCatching {
-                            kotlinx.coroutines.withTimeout(15 * 60_000L) { done.await() }
+                        if (finished) {
+                            if (!done.isCompleted) done.complete(Unit)
                         }
-                    } finally {
-                        runCatching { session.close() }
                     }
-                }
-                if (sessionResult.isFailure) {
-                    // Fallback: single-shot sync call emitted as one chunk.
-                    runCatching {
-                        val text = mutex.withLock {
-                            runCatching { generateViaSession(llm, fullPrompt) }
+                    // Bridge Guava ListenableFuture into coroutines so native
+                    // errors propagate instead of timing out silently.
+                    future.addListener(
+                        {
+                            try {
+                                future.get() // throws on native failure
+                                if (!done.isCompleted) done.complete(Unit)
+                            } catch (e: Exception) {
+                                if (!done.isCompleted) {
+                                    done.completeExceptionally(e)
+                                }
+                            }
+                        },
+                        { it.run() } // direct executor: listener is tiny
+                    )
+                    try {
+                        withTimeout(15 * 60_000L) { done.await() }
+                    } catch (e: Exception) {
+                        runCatching { future.cancel(true) }
+                        throw e
+                    }
+                    ensureActive()
+
+                    // Async path can "succeed" with zero tokens when the prompt
+                    // exceeds maxTokens or the template triggers instant EOS.
+                    // Fall back to sync so the caller gets text or a real error.
+                    if (accumulated.isEmpty()) {
+                        val syncText = mutex.withLock {
+                            runCatching { generateViaSessionLocked(llm, fullPrompt, config) }
                                 .getOrElse { llm.generateResponse(fullPrompt) }
                         }
-                        if (text.isNotEmpty()) trySend(text)
-                    }.onFailure { e ->
-                        close(e)
-                        return@withContext
+                        if (syncText.isNotEmpty()) trySendBlocking(syncText)
+                        else throw IllegalStateException(
+                            "Empty response (prompt likely exceeds maxTokens=${config.maxTokens} " +
+                                "or template mismatch). Prompt chars=${fullPrompt.length}."
+                        )
                     }
+                    close()
+                } catch (e: Exception) {
+                    // Last-resort sync fallback before failing the flow, so a
+                    // transient async-only failure still yields text.
+                    val recovered = runCatching {
+                        mutex.withLock {
+                            runCatching { generateViaSessionLocked(llm, fullPrompt, config) }
+                                .getOrElse { llm.generateResponse(fullPrompt) }
+                        }
+                    }.getOrNull()
+                    if (!recovered.isNullOrEmpty()) {
+                        trySendBlocking(recovered)
+                        close()
+                    } else {
+                        close(e)
+                    }
+                } finally {
+                    runCatching { session?.close() }
                 }
-                close()
             }
-            awaitClose { /* session closed above; nothing to retain */ }
-        }
+            awaitClose { job.cancel() }
+        }.buffer(Channel.UNLIMITED)
 
     override fun close() {
         // Best-effort synchronous close; native close is fast.
@@ -143,11 +209,19 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
         loadedModelId = null
     }
 
-    private fun generateViaSession(llm: LlmInference, fullPrompt: String): String {
+    private fun generateViaSession(llm: LlmInference, fullPrompt: String): String =
+        generateViaSessionLocked(llm, fullPrompt, activeConfig)
+
+    /** Caller must hold [mutex] if concurrent load()/generate() is possible. */
+    private fun generateViaSessionLocked(
+        llm: LlmInference,
+        fullPrompt: String,
+        config: LlmConfig
+    ): String {
         val sessionOptions = LlmInferenceSession.LlmInferenceSessionOptions.builder()
-            .setTemperature(activeConfig.temperature)
-            .setTopK(activeConfig.topK)
-            .setTopP(activeConfig.topP)
+            .setTemperature(config.temperature)
+            .setTopK(config.topK)
+            .setTopP(config.topP)
             .build()
         val session = LlmInferenceSession.createFromOptions(llm, sessionOptions)
         try {
@@ -160,8 +234,14 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
 
     companion object {
         /**
-         * ChatML format works well for TinyLlama, Phi-3, Qwen, Gemma, etc.
-         * Falls back to plain text if tokenizer doesn't recognize special tokens.
+         * TinyLlama-Chat template (from tokenizer_config.json chat_template):
+         *   '<|system|>\n' + content + '</s>\n'
+         *   '<|user|>\n' + content + '</s>\n'
+         *   '<|assistant|>\n' + content + '</s>\n'
+         *   ... + '<|assistant|>\n' as generation prompt.
+         * The trailing </s> matters: without it the prefill merges turns into
+         * one blob and multi-prefill .task builds often emit EOS immediately
+         * (observed as "loads fine, empty streaming").
          */
         fun buildPrompt(
             prompt: String,
@@ -169,16 +249,16 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
             systemPrompt: String
         ): String = buildString {
             if (systemPrompt.isNotBlank()) {
-                append("<|system|>\n").append(systemPrompt.trim()).append("\n")
+                append("<|system|>\n").append(systemPrompt.trim()).append("</s>\n")
             }
             // Keep the context bounded: last 10 turns max.
             for ((user, assistant) in history.takeLast(10)) {
-                append("<|user|>\n").append(user.trim()).append("\n")
+                append("<|user|>\n").append(user.trim()).append("</s>\n")
                 if (assistant.isNotBlank()) {
-                    append("<|assistant|>\n").append(assistant.trim()).append("\n")
+                    append("<|assistant|>\n").append(assistant.trim()).append("</s>\n")
                 }
             }
-            append("<|user|>\n").append(prompt.trim()).append("\n<|assistant|>\n")
+            append("<|user|>\n").append(prompt.trim()).append("</s>\n<|assistant|>\n")
         }
     }
 }
