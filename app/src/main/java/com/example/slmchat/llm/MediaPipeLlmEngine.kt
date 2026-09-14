@@ -160,9 +160,8 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
 
     companion object {
         /**
-         * Minimal chat template: system block + alternating turns. Individual
-         * `.task` chat templates vary; this plain format works acceptably across
-         * the catalog models without tokenizer-specific tokens.
+         * ChatML format works well for TinyLlama, Phi-3, Qwen, Gemma, etc.
+         * Falls back to plain text if tokenizer doesn't recognize special tokens.
          */
         fun buildPrompt(
             prompt: String,
@@ -170,16 +169,16 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
             systemPrompt: String
         ): String = buildString {
             if (systemPrompt.isNotBlank()) {
-                append("<system>\n").append(systemPrompt.trim()).append("\n</system>\n\n")
+                append("<|system|>\n").append(systemPrompt.trim()).append("\n")
             }
             // Keep the context bounded: last 10 turns max.
             for ((user, assistant) in history.takeLast(10)) {
-                append("<user>\n").append(user.trim()).append("\n</user>\n")
+                append("<|user|>\n").append(user.trim()).append("\n")
                 if (assistant.isNotBlank()) {
-                    append("<assistant>\n").append(assistant.trim()).append("\n</assistant>\n")
+                    append("<|assistant|>\n").append(assistant.trim()).append("\n")
                 }
             }
-            append("<user>\n").append(prompt.trim()).append("\n</user>\n<assistant>\n")
+            append("<|user|>\n").append(prompt.trim()).append("\n<|assistant|>\n")
         }
     }
 }
