@@ -1,5 +1,6 @@
 package com.example.slmchat.ui.settings
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,7 +16,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Copy
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.AlertDialog
@@ -45,6 +46,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -66,6 +68,7 @@ fun SettingsScreen(
     val downloadStates by viewModel.downloadStates.collectAsState()
     var showClearConfirm by remember { mutableStateOf(false) }
     var clearedMessage by remember { mutableStateOf(false) }
+    val ctx = LocalContext.current
 
     Scaffold(
         topBar = {
@@ -207,7 +210,7 @@ fun SettingsScreen(
             
             // Model path display
             val activeModel = ModelCatalog.requireById(settings.modelId)
-            val modelsDir = File(applicationContext.filesDir, "models")
+            val modelsDir = File(ctx.filesDir, "models")
             val modelFile = File(modelsDir, activeModel.fileName)
             val modelPathDisplay = if (modelFile.exists()) {
                 "Model location: ${modelFile.absolutePath}"
@@ -227,7 +230,7 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(Modifier.weight(1f))
-                        Icon(Icons.Filled.Copy, contentDescription = "Copy path",
+                        Icon(Icons.Filled.ContentCopy, contentDescription = "Copy path",
                             modifier = Modifier
                                 .fillMaxSize()
                                 .clickable { 

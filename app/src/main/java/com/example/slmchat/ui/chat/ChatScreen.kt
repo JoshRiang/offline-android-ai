@@ -1,7 +1,8 @@
 package com.example.slmchat.ui.chat
 
-import androidx.compose.animation.animateFloatAsState
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -21,8 +22,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
@@ -56,6 +58,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -158,7 +161,7 @@ fun ChatScreen(
                                 onClick = { viewModel.deleteConversation(convo.id) },
                                 modifier = Modifier.padding(end = 4.dp)
                             ) {
-                                Icon(Icons.Filled.Delete, contentDescription = "Delete conversation")
+                                Icon(Delete, contentDescription = "Delete conversation")
                             }
                         },
                         modifier = Modifier
@@ -182,7 +185,7 @@ fun ChatScreen(
                         contentColor = MaterialTheme.colorScheme.onPrimaryContainer
                     )
                 ) {
-                    Icon(Icons.Filled.Add, contentDescription = null)
+                    Icon(Add, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("New chat")
                 }
@@ -213,7 +216,7 @@ fun ChatScreen(
                             onClick = { scope.launch { drawerState.open() } },
                             modifier = Modifier.padding(start = 4.dp)
                         ) {
-                            Icon(Icons.Filled.Menu, contentDescription = "Conversations")
+                            Icon(Menu, contentDescription = "Conversations")
                         }
                     },
                     actions = {
@@ -224,7 +227,7 @@ fun ChatScreen(
                             },
                             modifier = Modifier.padding(end = 4.dp)
                         ) {
-                            Icon(Icons.Filled.Add, contentDescription = "New chat")
+                            Icon(Add, contentDescription = "New chat")
                         }
                         IconButton(
                             onClick = {
@@ -233,7 +236,7 @@ fun ChatScreen(
                             },
                             modifier = Modifier.padding(end = 4.dp)
                         ) {
-                            Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                            Icon(Settings, contentDescription = "Settings")
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -323,7 +326,7 @@ fun ChatScreen(
                             .weight(1f)
                             .fillMaxWidth()
                             .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp).Bottom,
+                        verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.Bottom),
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp)
                     ) {
                         items(messages, key = { it.id }) { message ->
@@ -421,7 +424,7 @@ private fun ModelDownloadBanner(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
-                    Icons.Filled.Download,
+                    Download,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSecondaryContainer
                 )
@@ -474,7 +477,7 @@ private fun ModelDownloadBanner(
                     Spacer(Modifier.height(8.dp))
                     Row {
                         Button(onClick = onDownload) {
-                            Icon(Icons.Filled.Download, contentDescription = null)
+                            Icon(Download, contentDescription = null)
                             Spacer(Modifier.width(4.dp))
                             Text("Retry")
                         }
@@ -491,7 +494,7 @@ private fun ModelDownloadBanner(
                     Spacer(Modifier.height(12.dp))
                     Row {
                         Button(onClick = onDownload) {
-                            Icon(Icons.Filled.Download, contentDescription = null)
+                            Icon(Download, contentDescription = null)
                             Spacer(Modifier.width(4.dp))
                             Text("Download")
                         }
