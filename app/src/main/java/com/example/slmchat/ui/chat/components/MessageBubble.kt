@@ -107,6 +107,16 @@ private fun forEachMatch(pattern: Pattern, input: String, action: (java.util.reg
 
 object MarkdownParser {
 
+    /**
+     * Last line of defense: strip raw chat-template tokens in case any slip
+     * past the engine sanitizer (e.g. cached old messages).
+     */
+    fun stripTemplateTokens(text: String): String =
+        text.replace("<|system|>", "")
+            .replace("<|user|>", "")
+            .replace("<|assistant|>", "")
+            .replace("</s>", "")
+
     private val BOLD_PATTERN = Pattern.compile("\\*\\*(.+?)\\*\\*")
     private val ITALIC_PATTERN = Pattern.compile("\\*(.+?)\\*")
     private val INLINE_CODE_PATTERN = Pattern.compile("`(.+?)`")
@@ -116,7 +126,7 @@ object MarkdownParser {
     private val BULLET_LIST_PATTERN = Pattern.compile("^\\s*[-*]\\s+(.+)$", Pattern.MULTILINE)
 
     fun parse(text: String, baseStyle: TextStyle, color: Color, scheme: androidx.compose.material3.ColorScheme): AnnotatedString {
-        var processed = text
+        var processed = stripTemplateTokens(text)
 
         // Handle block math first ($$...$$)
         val mathBlocks = mutableListOf<Pair<Int, String>>()

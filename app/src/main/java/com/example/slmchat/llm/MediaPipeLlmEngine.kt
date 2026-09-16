@@ -581,5 +581,39 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
             }
             return full
         }
+
+        /**
+         * Stop markers that end the assistant turn. MediaPipe's Android API
+         * (tasks-genai 0.10.27) has NO stop-sequence option, so a small model
+         * like TinyLlama happily role-plays a fake `<|user|>` follow-up when
+         * the real prompt is short ("yo"). Truncation must be post-processing.
+         */
+        private val STOP_MARKERS = listOf("<|user|>", "<|system|>", "</s>")
+
+        /** Strip a leading generation-prompt echo (`<|assistant|>`) some builds emit. */
+        fun stripPromptEcho(raw: String): String =
+            raw.replaceFirst(Regex("^\\s*<\\|assistant\\|>"), "")
+
+        /** Cut the text at the first stop marker (no trimming — streaming-safe). */
+        fun truncateAtStopMarkers(noEcho: String): String {
+            var cut = noEcho.length
+            for (m in STOP_MARKERS) {
+                val i = noEcho.indexOf(m)
+                if (i >= 0) cut = minOf(cut, i)
+            }
+            // A non-leading <|assistant|> means a new fabricated turn started.
+            val ai = noEcho.indexOf("<|assistant|>")
+            if (ai > 0) cut = minOf(cut, ai)
+            return noEcho.substring(0, cut)
+        }
+
+        /**
+         * Sanitize assistant output: strip prompt echo, cut fabricated turns.
+         * Pass final=true for persisted/final text (also trims whitespace).
+         */
+        fun sanitizeAssistantOutput(raw: String, final: Boolean = false): String {
+            val clean = truncateAtStopMarkers(stripPromptEcho(raw))
+            return if (final) clean.trim() else clean
+        }
     }
 }

@@ -259,43 +259,56 @@ class LlmManager(
                 }
             }
         }
-        // A trailing user turn without an assistant reply yet is context,
-        // not a pair — keep it by attaching the current prompt turn.
+        // A trailing user turn without an assistant reply yet is NORMAL here:
+        // ChatViewModel persists the just-sent user message BEFORE calling us,
+        // so pendingUser is almost always the current prompt itself. Do NOT
+        // re-add it — buildPrompt() appends `prompt` already. Only keep it as
+        // a pair if it differs (e.g. a genuinely unanswered earlier message).
         val pending = pendingUser
-        if (pending != null) turns += pending to ""
+        if (pending != null && pending != prompt && pending.trim() != prompt.trim()) {
+            turns += pending to ""
+        }
         val full = StringBuilder()
         try {
             engine.generateStreaming(prompt, turns).collect { delta ->
                 full.append(delta)
-                onToken(delta)
+                // Sanitize BEFORE display so fabricated <|user|> turns and raw
+                // </s> tokens never reach the bubble mid-stream. Recomputed from
+                // the full buffer each time (markers can span chunk bounds).
+                // onToken receives the FULL sanitized text (not a delta); the
+                // caller replaces its display buffer with it.
+                onToken(MediaPipeLlmEngine.sanitizeAssistantOutput(full.toString()))
             }
         } catch (e: CancellationException) {
-            // Stop pressed: persist partial output, then propagate.
-            if (full.isNotEmpty()) {
+            // Stop pressed: persist sanitized partial output, then propagate.
+            val clean = MediaPipeLlmEngine.sanitizeAssistantOutput(full.toString(), final = true)
+            if (clean.isNotEmpty()) {
                 runCatching {
-                    repository.updateMessageContent(assistantMessageId, full.toString())
+                    repository.updateMessageContent(assistantMessageId, clean)
                 }
             }
             throw e
         } catch (e: Exception) {
-            // Persist partial tokens (may be empty) so the failure is
+            // Persist sanitized partial tokens so the failure is
             // visible in the transcript, then propagate to the caller
             // which surfaces a user-visible error.
-            val text = full.ifEmpty {
-                StringBuilder("Generation failed: ${e.message ?: e::class.simpleName}")
-            }.toString()
+            val clean = MediaPipeLlmEngine.sanitizeAssistantOutput(full.toString(), final = true)
+            val text = clean.ifEmpty {
+                "Generation failed: ${e.message ?: e::class.simpleName}"
+            }
             runCatching {
                 repository.updateMessageContent(assistantMessageId, text)
             }
             throw e
         }
-        if (full.isEmpty()) {
+        val finalText = MediaPipeLlmEngine.sanitizeAssistantOutput(full.toString(), final = true)
+        if (finalText.isEmpty()) {
             throw IllegalStateException(
                 "Empty response from model ${engine.loadedModelId ?: settings.modelId}. " +
                     "Try shortening the conversation or lowering Max tokens."
             )
         }
-        repository.updateMessageContent(assistantMessageId, full.toString())
+        repository.updateMessageContent(assistantMessageId, finalText)
     }
 
     /** Track a caller-owned generation coroutine so Stop can cancel it. */

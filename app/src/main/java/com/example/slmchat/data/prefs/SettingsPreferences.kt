@@ -28,8 +28,10 @@ data class AppSettings(
 ) {
     companion object {
         const val DEFAULT_SYSTEM_PROMPT =
-            "You are a helpful, concise assistant running fully on-device. " +
-                "Answer clearly and keep responses focused."
+            "You are a helpful on-device assistant. Answer ONLY the user's last message, " +
+                "directly and concisely. Never invent new user messages, questions, or " +
+                "follow-ups. Never role-play as the user. If the message is short " +
+                "or unclear, give a brief answer or ask what they mean."
     }
 }
 

@@ -170,17 +170,21 @@ class ChatViewModel(
                 // Suspends in this coroutine so engine/load/stream failures
                 // throw here directly (old Job.join() swallowed them as
                 // cancellation → silent empty bubble, no snackbar).
+                // onToken delivers the FULL sanitized text each emission
+                // (LlmManager re-sanitizes from its buffer, since stop
+                // markers can span chunk bounds) — replace, don't append.
                 llmManager.generateReply(
                     conversationId = conversationId,
                     prompt = text,
                     assistantMessageId = assistantId,
-                    onToken = { delta ->
-                        buffer.append(delta)
-                        _streamingText.value = buffer.toString()
+                    onToken = { clean ->
+                        buffer.clear()
+                        buffer.append(clean)
+                        _streamingText.value = clean
                         // Persist progressively, throttled to avoid DB churn.
-                        if (buffer.length - lastPersisted >= 32) {
-                            lastPersisted = buffer.length
-                            repository.updateMessageContent(assistantId, buffer.toString())
+                        if (clean.length - lastPersisted >= 32) {
+                            lastPersisted = clean.length
+                            repository.updateMessageContent(assistantId, clean)
                         }
                     }
                 )
