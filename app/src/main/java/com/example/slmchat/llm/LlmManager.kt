@@ -6,6 +6,7 @@ import com.example.slmchat.data.local.MessageRole
 import com.example.slmchat.data.prefs.AppSettings
 import com.example.slmchat.data.prefs.SettingsPreferences
 import com.example.slmchat.data.repo.ChatRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -195,63 +196,112 @@ class LlmManager(
     /**
      * Stream the assistant reply for [prompt] in [conversationId]'s context.
      * Persists the final text to the placeholder [assistantMessageId].
+     *
+     * Suspends in the caller's coroutine so failures propagate directly.
+     * (Previously this launched a child job in [scope] and returned the Job;
+     * `Job.join()` only throws CancellationException, so every real failure
+     * arrived as cancellation and ChatViewModel rethrew it without ever
+     * setting the user-visible error — generate failed silently with an
+     * empty bubble and no snackbar.)
      */
-    fun generateReply(
+    suspend fun generateReply(
         conversationId: Long,
         prompt: String,
         assistantMessageId: Long,
         onToken: suspend (String) -> Unit = {}
-    ): Job {
-        generationJob?.cancel()
-        val job = scope.launch(Dispatchers.IO) {
-            val settings = prefs.settings.first()
-            // Ensure the right model is loaded with current sampling settings.
-            val config = LlmConfig(
-                temperature = settings.temperature,
-                topK = settings.topK,
-                topP = settings.topP,
-                maxTokens = settings.maxTokens,
-                useGpu = settings.useGpu,
-                systemPrompt = settings.systemPrompt
+    ) {
+        require(prompt.isNotBlank()) { "Message must not be empty" }
+        val settings = prefs.settings.first()
+        // Ensure the right model is loaded with current sampling settings.
+        val config = LlmConfig(
+            temperature = settings.temperature,
+            topK = settings.topK,
+            topP = settings.topP,
+            maxTokens = settings.maxTokens,
+            useGpu = settings.useGpu,
+            systemPrompt = settings.systemPrompt
+        )
+        val file = modelFile(settings.modelId)
+        if (!file.exists() || file.length() == 0L) {
+            throw IllegalStateException(
+                "Model file \"${settings.modelId}\" is missing (expected ${file.absolutePath}). " +
+                    "Re-download it from Settings."
             )
-            val file = modelFile(settings.modelId)
-            if (!file.exists()) {
-                throw IllegalStateException("Model not downloaded")
-            }
-            if (!engine.isLoaded || engine.loadedModelId != settings.modelId) {
-                _engineState.value = EngineState.Loading
+        }
+        if (!engine.isLoaded || engine.loadedModelId != settings.modelId) {
+            _engineState.value = EngineState.Loading
+            try {
                 engine.load(settings.modelId, file, config).getOrThrow()
-                _engineState.value = EngineState.Ready(settings.modelId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _engineState.value = EngineState.Error(e.message ?: "Failed to load model")
+                throw e
             }
-            val historyRows = repository.recentMessages(conversationId, 20)
-                .filter { it.id != assistantMessageId && it.content.isNotBlank() }
-            // Pair consecutive user -> assistant turns.
-            val turns = mutableListOf<Pair<String, String>>()
-            var pendingUser: String? = null
-            for (row in historyRows) {
-                when (row.role) {
-                    MessageRole.USER -> {
-                        if (pendingUser == null) pendingUser = row.content
-                    }
-                    MessageRole.ASSISTANT -> {
-                        val u = pendingUser
-                        if (u != null) {
-                            turns += u to row.content
-                            pendingUser = null
-                        }
+            _engineState.value = EngineState.Ready(settings.modelId)
+        }
+        val historyRows = repository.recentMessages(conversationId, 20)
+            .filter { it.id != assistantMessageId && it.content.isNotBlank() }
+        // Pair consecutive user -> assistant turns.
+        val turns = mutableListOf<Pair<String, String>>()
+        var pendingUser: String? = null
+        for (row in historyRows) {
+            when (row.role) {
+                MessageRole.USER -> {
+                    if (pendingUser == null) pendingUser = row.content
+                }
+                MessageRole.ASSISTANT -> {
+                    val u = pendingUser
+                    if (u != null) {
+                        turns += u to row.content
+                        pendingUser = null
                     }
                 }
             }
-            val full = StringBuilder()
+        }
+        // A trailing user turn without an assistant reply yet is context,
+        // not a pair — keep it by attaching the current prompt turn.
+        val pending = pendingUser
+        if (pending != null) turns += pending to ""
+        val full = StringBuilder()
+        try {
             engine.generateStreaming(prompt, turns).collect { delta ->
                 full.append(delta)
                 onToken(delta)
             }
-            if (full.isEmpty()) full.append("(empty response)")
-            repository.updateMessageContent(assistantMessageId, full.toString())
+        } catch (e: CancellationException) {
+            // Stop pressed: persist partial output, then propagate.
+            if (full.isNotEmpty()) {
+                runCatching {
+                    repository.updateMessageContent(assistantMessageId, full.toString())
+                }
+            }
+            throw e
+        } catch (e: Exception) {
+            // Persist partial tokens (may be empty) so the failure is
+            // visible in the transcript, then propagate to the caller
+            // which surfaces a user-visible error.
+            val text = full.ifEmpty {
+                StringBuilder("Generation failed: ${e.message ?: e::class.simpleName}")
+            }.toString()
+            runCatching {
+                repository.updateMessageContent(assistantMessageId, text)
+            }
+            throw e
         }
+        if (full.isEmpty()) {
+            throw IllegalStateException(
+                "Empty response from model ${engine.loadedModelId ?: settings.modelId}. " +
+                    "Try shortening the conversation or lowering Max tokens."
+            )
+        }
+        repository.updateMessageContent(assistantMessageId, full.toString())
+    }
+
+    /** Track a caller-owned generation coroutine so Stop can cancel it. */
+    fun trackGeneration(job: Job) {
+        generationJob?.cancel()
         generationJob = job
-        return job
     }
 
     /** Cold flow variant for callers that want tokens directly. */

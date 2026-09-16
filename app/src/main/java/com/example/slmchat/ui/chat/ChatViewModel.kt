@@ -15,6 +15,7 @@ import com.example.slmchat.llm.ModelCatalog
 import com.example.slmchat.llm.ModelDownloadState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -153,6 +154,8 @@ class ChatViewModel(
         _streamingText.value = ""
 
         generateJob = viewModelScope.launch {
+            // Register with LlmManager so Stop cancels the in-flight collect.
+            llmManager.trackGeneration(currentCoroutineContext()[Job]!!)
             try {
                 val conversationId = repository.ensureConversation(_activeConversationId.value)
                 _activeConversationId.value = conversationId
@@ -164,6 +167,9 @@ class ChatViewModel(
 
                 var lastPersisted = 0
                 val buffer = StringBuilder()
+                // Suspends in this coroutine so engine/load/stream failures
+                // throw here directly (old Job.join() swallowed them as
+                // cancellation → silent empty bubble, no snackbar).
                 llmManager.generateReply(
                     conversationId = conversationId,
                     prompt = text,
@@ -177,7 +183,7 @@ class ChatViewModel(
                             repository.updateMessageContent(assistantId, buffer.toString())
                         }
                     }
-                ).join()
+                )
                 // Final persist is done inside LlmManager; ensure UI reflects it.
                 _streamingText.value = ""
             } catch (e: Exception) {
