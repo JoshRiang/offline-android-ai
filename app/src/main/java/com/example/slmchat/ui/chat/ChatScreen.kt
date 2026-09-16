@@ -58,8 +58,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.hapticfeedback.performHapticFeedback
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -91,7 +90,7 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
+    val haptics = LocalHapticFeedback.current
 
     val activeModel = ModelCatalog.requireById(settings.modelId)
     val downloadState = downloadStates[settings.modelId] ?: ModelDownloadState.NotDownloaded
@@ -220,7 +219,7 @@ fun ChatScreen(
                     actions = {
                         IconButton(
                             onClick = {
-                                performHapticFeedback(context, HapticFeedbackType.Light)
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                 viewModel.newConversation()
                             },
                             modifier = Modifier.padding(end = 4.dp)
@@ -229,7 +228,7 @@ fun ChatScreen(
                         }
                         IconButton(
                             onClick = {
-                                performHapticFeedback(context, HapticFeedbackType.Light)
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                 onOpenSettings()
                             },
                             modifier = Modifier.padding(end = 4.dp)
@@ -248,11 +247,11 @@ fun ChatScreen(
                     value = input,
                     onValueChange = viewModel::onInputChange,
                     onSend = {
-                        performHapticFeedback(context, HapticFeedbackType.Light)
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                         viewModel.send()
                     },
                     onStop = {
-                        performHapticFeedback(context, HapticFeedbackType.Light)
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                         viewModel.stopGenerating()
                     },
                     isGenerating = isGenerating,
@@ -272,15 +271,15 @@ fun ChatScreen(
                         modelName = activeModel.name,
                         modelSizeMb = activeModel.sizeMb,
                         onDownload = {
-                            performHapticFeedback(context, HapticFeedbackType.Light)
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                             viewModel.downloadActiveModel()
                         },
                         onCancel = {
-                            performHapticFeedback(context, HapticFeedbackType.Light)
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                             viewModel.cancelActiveDownload()
                         },
                         onOpenSettings = {
-                            performHapticFeedback(context, HapticFeedbackType.Light)
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                             onOpenSettings()
                         }
                     )
@@ -503,10 +502,4 @@ private fun ModelDownloadBanner(
             }
         }
     }
-}
-
-private fun androidx.compose.ui.platform.LocalContext.performHapticFeedback(
-    type: HapticFeedbackType = HapticFeedbackType.Light
-) {
-    (this as? android.view.View)?.performHapticFeedback(type.ordinal)
 }
