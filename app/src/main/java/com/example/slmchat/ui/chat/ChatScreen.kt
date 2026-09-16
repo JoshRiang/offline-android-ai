@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
@@ -41,6 +42,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -161,7 +163,7 @@ fun ChatScreen(
                                 onClick = { viewModel.deleteConversation(convo.id) },
                                 modifier = Modifier.padding(end = 4.dp)
                             ) {
-                                Icon(Delete, contentDescription = "Delete conversation")
+                                Icon(Icons.Filled.Delete, contentDescription = "Delete conversation")
                             }
                         },
                         modifier = Modifier
@@ -185,7 +187,7 @@ fun ChatScreen(
                         contentColor = MaterialTheme.colorScheme.onPrimaryContainer
                     )
                 ) {
-                    Icon(Add, contentDescription = null)
+                    Icon(Icons.Filled.Add, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("New chat")
                 }
@@ -216,7 +218,7 @@ fun ChatScreen(
                             onClick = { scope.launch { drawerState.open() } },
                             modifier = Modifier.padding(start = 4.dp)
                         ) {
-                            Icon(Menu, contentDescription = "Conversations")
+                            Icon(Icons.Filled.Menu, contentDescription = "Conversations")
                         }
                     },
                     actions = {
@@ -227,7 +229,7 @@ fun ChatScreen(
                             },
                             modifier = Modifier.padding(end = 4.dp)
                         ) {
-                            Icon(Add, contentDescription = "New chat")
+                            Icon(Icons.Filled.Add, contentDescription = "New chat")
                         }
                         IconButton(
                             onClick = {
@@ -236,7 +238,7 @@ fun ChatScreen(
                             },
                             modifier = Modifier.padding(end = 4.dp)
                         ) {
-                            Icon(Settings, contentDescription = "Settings")
+                            Icon(Icons.Filled.Settings, contentDescription = "Settings")
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -424,7 +426,7 @@ private fun ModelDownloadBanner(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
-                    Download,
+                    Icons.Filled.Download,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSecondaryContainer
                 )
@@ -477,7 +479,7 @@ private fun ModelDownloadBanner(
                     Spacer(Modifier.height(8.dp))
                     Row {
                         Button(onClick = onDownload) {
-                            Icon(Download, contentDescription = null)
+                            Icon(Icons.Filled.Download, contentDescription = null)
                             Spacer(Modifier.width(4.dp))
                             Text("Retry")
                         }
@@ -494,7 +496,7 @@ private fun ModelDownloadBanner(
                     Spacer(Modifier.height(12.dp))
                     Row {
                         Button(onClick = onDownload) {
-                            Icon(Download, contentDescription = null)
+                            Icon(Icons.Filled.Download, contentDescription = null)
                             Spacer(Modifier.width(4.dp))
                             Text("Download")
                         }
