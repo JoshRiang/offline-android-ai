@@ -516,22 +516,39 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
          * one blob and multi-prefill .task builds often emit EOS immediately
          * (observed as "loads fine, empty streaming").
          */
+        /**
+         * Clean a stored turn: strip template tokens leaked by earlier buggy
+         * builds so poisoned histories self-heal instead of confusing the
+         * model forever (nested `<|user|>` inside a turn → instant EOS).
+         */
+        fun cleanTurn(text: String): String =
+            text.replace("<|system|>", "")
+                .replace("<|user|>", "")
+                .replace("<|assistant|>", "")
+                .replace("</s>", "")
+                .trim()
+
         fun buildPrompt(
             prompt: String,
             history: List<Pair<String, String>>,
             systemPrompt: String
         ): String = buildString {
-            if (systemPrompt.isNotBlank()) {
-                append("<|system|>\n").append(systemPrompt.trim()).append("</s>\n")
+            val cleanSystem = cleanTurn(systemPrompt)
+            if (cleanSystem.isNotBlank()) {
+                append("<|system|>\n").append(cleanSystem).append("</s>\n")
             }
             // Keep the context bounded: last 10 turns max.
             for ((user, assistant) in history.takeLast(10)) {
-                append("<|user|>\n").append(user.trim()).append("</s>\n")
-                if (assistant.isNotBlank()) {
-                    append("<|assistant|>\n").append(assistant.trim()).append("</s>\n")
+                val cu = cleanTurn(user)
+                if (cu.isBlank()) continue
+                append("<|user|>\n").append(cu).append("</s>\n")
+                val ca = cleanTurn(assistant)
+                if (ca.isNotBlank()) {
+                    append("<|assistant|>\n").append(ca).append("</s>\n")
                 }
             }
-            append("<|user|>\n").append(prompt.trim()).append("</s>\n<|assistant|>\n")
+            val cp = cleanTurn(prompt)
+            append("<|user|>\n").append(cp.ifBlank { prompt.trim() }).append("</s>\n<|assistant|>\n")
         }
 
         /**
