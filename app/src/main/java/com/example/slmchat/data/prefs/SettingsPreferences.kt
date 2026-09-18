@@ -19,8 +19,10 @@ data class AppSettings(
     val temperature: Float = 0.7f,
     val topK: Int = 40,
     val topP: Float = 0.9f,
-    // TOTAL context window (prompt + output) for MediaPipe. TinyLlama ctx 2048.
-    val maxTokens: Int = 2048,
+    // TOTAL context window (prompt + output) for MediaPipe. The bundled
+    // TinyLlama .task only has a 1280-token KV cache (ekv1280), so 1024 is the
+    // safe default; MediaPipeLlmEngine clamps anything above the bundle cap.
+    val maxTokens: Int = 1024,
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
     val useGpu: Boolean = true,
     /** Optional user-supplied direct download URL overriding the catalog URL. */
@@ -54,7 +56,10 @@ class SettingsPreferences(private val context: Context) {
             temperature = prefs[Keys.TEMPERATURE] ?: 0.7f,
             topK = prefs[Keys.TOP_K] ?: 40,
             topP = prefs[Keys.TOP_P] ?: 0.9f,
-            maxTokens = prefs[Keys.MAX_TOKENS] ?: 2048,
+            // Coerce on read so values stored by older builds (e.g. 2048/4096,
+            // above the bundle KV cap) self-migrate instead of silently
+            // producing empty responses.
+            maxTokens = (prefs[Keys.MAX_TOKENS] ?: 1024).coerceIn(512, 1280),
             systemPrompt = prefs[Keys.SYSTEM_PROMPT]
                 ?: AppSettings.DEFAULT_SYSTEM_PROMPT,
             useGpu = prefs[Keys.USE_GPU] ?: true,
@@ -79,7 +84,7 @@ class SettingsPreferences(private val context: Context) {
     }
 
     suspend fun setMaxTokens(value: Int) {
-        context.settingsStore.edit { it[Keys.MAX_TOKENS] = value.coerceIn(128, 4096) }
+        context.settingsStore.edit { it[Keys.MAX_TOKENS] = value.coerceIn(512, 1280) }
     }
 
     suspend fun setSystemPrompt(value: String) {

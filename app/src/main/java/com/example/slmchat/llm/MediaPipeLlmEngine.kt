@@ -59,14 +59,18 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
                 runCatching {
                     closeLocked()
                     require(modelFile.exists()) { "Model file not found: ${modelFile.absolutePath}" }
-                    val effectiveMaxTokens = effectiveMaxTokens(config.maxTokens)
+                    val window = windowFor(modelId)
+                    val effectiveMaxTokens = effectiveMaxTokens(config.maxTokens, window)
                     if (effectiveMaxTokens != config.maxTokens) {
                         Log.w(
                             TAG,
                             "load: clamping maxTokens ${config.maxTokens} -> $effectiveMaxTokens " +
-                                "(TinyLlama ctx=$TINYLLAMA_CONTEXT, allowed $MIN_MAX_TOKENS..$MAX_MAX_TOKENS)"
+                                "(bundle window=$window, allowed $MIN_MAX_TOKENS..$window)"
                         )
                     }
+                    // Clamp sampler: topK must be <= the maxTopK load option or
+                    // generation fails; temp/topP out of range misbehave too.
+                    val safeConfig = clampSampler(config)
                     val forceCpu = shouldForceCpu()
                     val wantGpu = config.useGpu && !forceCpu
                     if (config.useGpu && forceCpu) {
@@ -85,6 +89,7 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
                     val optionsBuilder = LlmInference.LlmInferenceOptions.builder()
                         .setModelPath(modelFile.absolutePath)
                         .setMaxTokens(effectiveMaxTokens)
+                        .setMaxTopK(safeConfig.topK)
                     try {
                         optionsBuilder.setPreferredBackend(
                             if (wantGpu) LlmInference.Backend.GPU
@@ -111,6 +116,7 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
                         val cpuOptions = LlmInference.LlmInferenceOptions.builder()
                             .setModelPath(modelFile.absolutePath)
                             .setMaxTokens(effectiveMaxTokens)
+                            .setMaxTopK(safeConfig.topK)
                             .build()
                         try {
                             LlmInference.createFromOptions(appContext, cpuOptions)
@@ -119,7 +125,7 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
                             throw t
                         }
                     }
-                    activeConfig = config.copy(maxTokens = effectiveMaxTokens)
+                    activeConfig = safeConfig.copy(maxTokens = effectiveMaxTokens)
                     loadedModelId = modelId
                     Log.i(TAG, "load: ready model=$modelId")
                     Unit
@@ -131,18 +137,19 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
         withContext(Dispatchers.IO) {
             mutex.withLock {
                 val llm = inference ?: error("Engine not loaded")
-                val fullPrompt = fitPrompt(prompt, history, activeConfig.systemPrompt, activeConfig.maxTokens)
+                val fullPrompt = fitPromptExactLocked(
+                    llm, prompt, history, activeConfig.systemPrompt, activeConfig.maxTokens
+                )
                 Log.d(TAG, "generate: promptChars=${fullPrompt.length} maxTokens=${activeConfig.maxTokens}")
                 // Prefer session API (sampling params), fall back to direct call.
-                val viaSession = runCatching {
+                var text = runCatching {
                     try {
                         generateViaSessionLocked(llm, fullPrompt, activeConfig)
                     } catch (t: Throwable) {
                         Log.e(TAG, "generate: session path failed", t)
                         throw t
                     }
-                }
-                viaSession.getOrElse { sessionError ->
+                }.getOrElse { sessionError ->
                     Log.w(TAG, "generate: falling back to direct generateResponse", sessionError)
                     try {
                         llm.generateResponse(fullPrompt)
@@ -151,6 +158,18 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
                         throw t
                     }
                 }
+                if (text.isBlank()) {
+                    // Instant-EOS (often a template/prefill quirk on multi-prefill
+                    // bundles): one keep-alive retry with a bare prompt instead
+                    // of returning an empty string. Decode temperature is nudged
+                    // up so greedy EOS-at-0 doesn't repeat deterministically.
+                    Log.w(TAG, "generate: empty, trying keep-alive retry")
+                    text = runCatching {
+                        val retryConfig = configForRetry(activeConfig)
+                        generateKeepAliveLocked(llm, prompt, retryConfig)
+                    }.getOrDefault("")
+                }
+                text
             }
         }
 
@@ -168,7 +187,9 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
                     return@callbackFlow
                 }
                 config = activeConfig
-                fullPrompt = fitPrompt(prompt, history, config.systemPrompt, config.maxTokens)
+                fullPrompt = fitPromptExactLocked(
+                    llm, prompt, history, config.systemPrompt, config.maxTokens
+                )
             }
             Log.i(
                 TAG,
@@ -302,25 +323,31 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
                             "maxTokens=${config.maxTokens}); trying sync fallback"
                     )
                     ensureActive()
+                    val retryConfig = configForRetry(config)
                     val syncText = mutex.withLock {
-                        runCatching {
-                            try {
-                                generateViaSessionLocked(llm, fullPrompt, config)
-                            } catch (t: Throwable) {
-                                Log.e(TAG, "stream: sync session fallback failed", t)
-                                throw t
+                        // Re-fit with exact tokens first: the prompt may have
+                        // grown past the window between snapshot and fallback.
+                        val refit = runCatching {
+                            fitPromptExactLocked(llm, prompt, history, retryConfig.systemPrompt, retryConfig.maxTokens)
+                        }.getOrDefault(fullPrompt)
+                        val viaSession = runCatching { generateViaSessionLocked(llm, refit, retryConfig) }
+                            .getOrElse {
+                                try {
+                                    llm.generateResponse(refit)
+                                } catch (t: Throwable) {
+                                    Log.e(TAG, "stream: sync direct fallback failed", t)
+                                    throw t
+                                }
                             }
-                        }.getOrElse {
-                            try {
-                                llm.generateResponse(fullPrompt)
-                            } catch (t: Throwable) {
-                                Log.e(TAG, "stream: sync direct fallback failed", t)
-                                throw t
-                            }
-                        }
+                        if (viaSession.isNotBlank()) return@withLock viaSession
+                        // Same instant-EOS as the async path hit: retry bare.
+                        Log.w(TAG, "stream: sync empty too, trying keep-alive retry")
+                        runCatching { generateKeepAliveLocked(llm, prompt, retryConfig) }
+                            .getOrDefault("")
                     }
                     if (syncText.isNotEmpty()) {
                         Log.i(TAG, "stream: sync fallback yielded ${syncText.length} chars")
+                        accumulated.append(syncText)
                         trySend(syncText)
                     } else {
                         throw IllegalStateException(
@@ -407,6 +434,14 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
     private fun generateViaSession(llm: LlmInference, fullPrompt: String): String =
         generateViaSessionLocked(llm, fullPrompt, activeConfig)
 
+    /**
+     * Retry config after an instant-EOS empty response: nudge temperature up
+     * from greedy-0 so the same deterministic EOS doesn't repeat. Keeps the
+     * user's sampler otherwise (topK/topP still clamped at load).
+     */
+    private fun configForRetry(config: LlmConfig): LlmConfig =
+        if (config.temperature <= 0.05f) config.copy(temperature = 0.7f) else config
+
     /** Caller must hold [mutex] if concurrent load()/generate() is possible. */
     private fun generateViaSessionLocked(
         llm: LlmInference,
@@ -451,12 +486,12 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
     companion object {
         const val TAG = "MediaPipeLlmEngine"
 
-        /** Default window for TinyLlama-1.1B-Chat (ctx 2048). Prompt + output share it. */
-        const val DEFAULT_MAX_TOKENS = 2048
+        /** Safe default window: fits the TinyLlama ekv1280 bundle KV cache. */
+        const val DEFAULT_MAX_TOKENS = 1024
 
         /** Hard bounds for the MediaPipe maxTokens option. */
         const val MIN_MAX_TOKENS = 512
-        const val MAX_MAX_TOKENS = 2048
+        const val MAX_MAX_TOKENS = 4096
 
         /** Output tokens reserved when fitting the prompt; prevents instant-EOS/empty output. */
         const val RESERVED_OUTPUT_TOKENS = 256
@@ -502,8 +537,24 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
                 "soc=${if (Build.VERSION.SDK_INT >= 31) Build.SOC_MODEL else "n/a"}"
         }.getOrDefault("unknown-device")
 
-        fun effectiveMaxTokens(requested: Int): Int =
-            requested.coerceIn(MIN_MAX_TOKENS, MAX_MAX_TOKENS)
+        fun effectiveMaxTokens(requested: Int, windowTokens: Int = MAX_MAX_TOKENS): Int =
+            requested.coerceIn(MIN_MAX_TOKENS, windowTokens.coerceAtLeast(MIN_MAX_TOKENS))
+
+        /** Usable prefill+decode window for [modelId] (bundle KV cap, not native ctx). */
+        fun windowFor(modelId: String): Int =
+            runCatching { ModelCatalog.requireById(modelId).windowTokens }
+                .getOrDefault(MAX_MAX_TOKENS)
+
+        /**
+         * Clamp sampler params to ranges MediaPipe accepts. In particular
+         * topK must never exceed the maxTopK load option (set to the same
+         * clamped value at load); a topK above it fails generation.
+         */
+        fun clampSampler(config: LlmConfig): LlmConfig = config.copy(
+            temperature = config.temperature.coerceIn(0f, 2f),
+            topK = config.topK.coerceIn(1, 64),
+            topP = config.topP.coerceIn(0.01f, 1f)
+        )
 
         /**
          * TinyLlama-Chat template (from tokenizer_config.json chat_template of
@@ -525,7 +576,14 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
             text.replace("<|system|>", "")
                 .replace("<|user|>", "")
                 .replace("<|assistant|>", "")
+                .replace("<|im_start|>", "")
+                .replace("<|im_end|>", "")
+                .replace("<<SYS>>", "")
+                .replace("<</SYS>>", "")
+                .replace("[INST]", "")
+                .replace("[/INST]", "")
                 .replace("</s>", "")
+                .replace("<s>", "")
                 .trim()
 
         fun buildPrompt(
@@ -600,16 +658,108 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
         }
 
         /**
+         * Exact-token variant of [fitPrompt] using the bundle's real tokenizer
+         * via [LlmInference.sizeInTokens]. Char heuristics over/under-estimate
+         * non-English text; this measures the actual prompt and trims history
+         * turns until prompt + reserved output fits [maxTokens]. Falls back to
+         * [fitPrompt] when the native call throws (e.g. mid-load teardown).
+         * Callers must hold the engine mutex (reads native tokenizer state).
+         */
+        fun fitPromptExactLocked(
+            llm: LlmInference,
+            prompt: String,
+            history: List<Pair<String, String>>,
+            systemPrompt: String,
+            maxTokens: Int
+        ): String {
+            require(prompt.isNotBlank() || history.isNotEmpty()) {
+                "Prompt must not be empty"
+            }
+            val window = effectiveMaxTokens(maxTokens)
+            val budget = (window - RESERVED_OUTPUT_TOKENS).coerceAtLeast(64)
+            var turns = 10
+            var full = buildPrompt(prompt, history.takeLast(turns), systemPrompt)
+            var used: Int = runCatching { llm.sizeInTokens(full) }.getOrNull()
+                ?: run {
+                    Log.w(TAG, "fitPromptExact: sizeInTokens unavailable, using char heuristic")
+                    return fitPrompt(prompt, history, systemPrompt, maxTokens)
+                }
+            while (used > budget && turns > 0) {
+                turns -= 2
+                full = buildPrompt(prompt, history.takeLast(turns.coerceAtLeast(0)), systemPrompt)
+                used = runCatching { llm.sizeInTokens(full) }.getOrDefault(used)
+            }
+            if (used > budget) {
+                Log.w(TAG, "fitPromptExact: truncating $used -> $budget tokens (window=$window)")
+                return fitPrompt(prompt, history.takeLast(turns.coerceAtLeast(0)), systemPrompt, maxTokens)
+            }
+            if (turns < 10) {
+                Log.w(TAG, "fitPromptExact: dropped history to last $turns turns ($used/$budget tokens)")
+            }
+            return full
+        }
+
+        /**
+         * Keep-alive retry for instant-EOS empty responses (template/prefill
+         * quirk on the multi-prefill TinyLlama bundle): issue a FRESH session
+         * with a bare no-history prompt (system + current user turn only) and
+         * read the sync response. Dropping history avoids re-triggering the
+         * same instant-EOS the full prompt caused.
+         * Callers must hold the engine mutex.
+         */
+        private fun generateKeepAliveLocked(
+            llm: LlmInference,
+            prompt: String,
+            config: LlmConfig
+        ): String {
+            val bare = buildString {
+                val cleanSystem = cleanTurn(config.systemPrompt)
+                if (cleanSystem.isNotBlank()) {
+                    append("<|system|>\n").append(cleanSystem).append("</s>\n")
+                }
+                val cp = cleanTurn(prompt)
+                append("<|user|>\n").append(cp.ifBlank { prompt.trim() }).append("</s>\n<|assistant|>\n")
+            }
+            Log.w(TAG, "keepAlive: retrying with bare prompt (${bare.length} chars)")
+            val sessionOptions = LlmInferenceSession.LlmInferenceSessionOptions.builder()
+                .setTemperature(config.temperature)
+                .setTopK(config.topK)
+                .setTopP(config.topP)
+                .build()
+            var session: LlmInferenceSession? = null
+            try {
+                session = LlmInferenceSession.createFromOptions(llm, sessionOptions)
+                session.addQueryChunk(bare)
+                return session.generateResponse()
+            } finally {
+                runCatching { session?.close() }
+            }
+        }
+
+        /**
          * Stop markers that end the assistant turn. MediaPipe's Android API
          * (tasks-genai 0.10.27) has NO stop-sequence option, so a small model
          * like TinyLlama happily role-plays a fake `<|user|>` follow-up when
          * the real prompt is short ("yo"). Truncation must be post-processing.
+         * Extra families (ChatML <|im_*|>, Llama [INST], <<SYS>>) cover
+         * non-TinyLlama bundles a user may sideload via custom URL, and plain
+         * "User:"/"Assistant:" roleplay lines are caught too.
          */
-        private val STOP_MARKERS = listOf("<|user|>", "<|system|>", "</s>")
+        private val STOP_MARKERS = listOf(
+            "<|user|>", "<|system|>", "</s>",
+            "<|im_start|>", "<|im_end|>",
+            "[INST]", "[/INST]", "<<SYS>>", "<</SYS>>"
+        )
+
+        /** Roleplay-line prefixes TinyLlama emits when it keeps talking ("User: …"). */
+        private val ROLEPLAY_LINE_PREFIXES = listOf("user:", "system:")
 
         /** Strip a leading generation-prompt echo (`<|assistant|>`) some builds emit. */
-        fun stripPromptEcho(raw: String): String =
-            raw.replaceFirst(Regex("^\\s*<\\|assistant\\|>"), "")
+        fun stripPromptEcho(raw: String): String {
+            var out = raw.replaceFirst(Regex("^\\s*<\\|assistant\\|>"), "")
+            out = out.replaceFirst(Regex("^\\s*(assistant|asistente)\\s*:\\s*", RegexOption.IGNORE_CASE), "")
+            return out
+        }
 
         /** Cut the text at the first stop marker (no trimming — streaming-safe). */
         fun truncateAtStopMarkers(noEcho: String): String {
@@ -621,7 +771,21 @@ class MediaPipeLlmEngine(private val appContext: Context) : LlmEngine {
             // A non-leading <|assistant|> means a new fabricated turn started.
             val ai = noEcho.indexOf("<|assistant|>")
             if (ai > 0) cut = minOf(cut, ai)
-            return noEcho.substring(0, cut)
+            var out = noEcho.substring(0, cut)
+            // Drop trailing roleplay lines ("User: ..." / "Assistant: ...")
+            // the model appends after finishing its answer. Keep at most the
+            // first such line boundary — scan line by line.
+            val lines = out.lines()
+            val kept = ArrayList<String>(lines.size)
+            for (line in lines) {
+                val t = line.trimStart().lowercase()
+                val isRoleplay = ROLEPLAY_LINE_PREFIXES.any { t.startsWith(it) } ||
+                    (t.startsWith("assistant:") || t.startsWith("asistente:"))
+                if (isRoleplay && kept.isNotEmpty()) break
+                kept.add(line)
+            }
+            if (kept.size < lines.size) out = kept.joinToString("\n")
+            return out
         }
 
         /**

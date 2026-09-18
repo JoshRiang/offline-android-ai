@@ -9,9 +9,13 @@ data class LlmConfig(
     val topK: Int = 40,
     val topP: Float = 0.9f,
     // MediaPipe maxTokens = TOTAL context window (prompt + output), not
-    // output-only. TinyLlama ctx is 2048, so default to the full window;
+    // output-only. The bundled TinyLlama .task was converted with a 1280-token
+    // KV cache (ekv1280 filename suffix), so the usable window is <= 1280 even
+    // though the base model natively supports 2048. Requesting more than the
+    // bundle KV capacity makes prefill overflow -> instant EOS -> EMPTY output
+    // on every prompt, including fresh chats. Default 1024 leaves headroom;
     // MediaPipeLlmEngine.fitPrompt() reserves output space automatically.
-    val maxTokens: Int = 2048,
+    val maxTokens: Int = 1024,
     val useGpu: Boolean = true,
     val systemPrompt: String = ""
 )

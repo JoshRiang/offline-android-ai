@@ -31,6 +31,13 @@ sealed interface ModelDownloadState {
 /**
  * Coordinates model files (download/delete), engine loading, and generation.
  * Owned by [com.example.slmchat.SlmChatApp] as a process-wide singleton.
+ *
+ * History hygiene: rows are cleaned via [MediaPipeLlmEngine.cleanTurn] and
+ * dropped when blank-after-clean, so poisoned histories (template tokens
+ * leaked by older builds) self-heal. Assistant rows whose content is an
+ * error placeholder ("Generation failed: …") are EXCLUDED from history so
+ * one failure doesn't poison every future prompt (observed as permanent
+ * empty-response after a single failure).
  */
 class LlmManager(
     private val appContext: Context,
@@ -248,12 +255,25 @@ class LlmManager(
         for (row in historyRows) {
             when (row.role) {
                 MessageRole.USER -> {
+                    // Clean + drop poisoned/blank rows: template tokens leaked
+                    // by older builds otherwise nest inside the new prompt and
+                    // trigger instant-EOS (empty response) on every retry.
+                    val clean = MediaPipeLlmEngine.cleanTurn(row.content)
+                    if (clean.isBlank()) {
+                        pendingUser = null
+                        continue
+                    }
                     if (pendingUser == null) pendingUser = row.content
                 }
                 MessageRole.ASSISTANT -> {
                     val u = pendingUser
                     if (u != null) {
-                        turns += u to row.content
+                        // Never feed error placeholders back: one failure would
+                        // otherwise poison all future prompts in this chat.
+                        val cleanA = MediaPipeLlmEngine.cleanTurn(row.content)
+                        if (cleanA.isNotBlank() && !isErrorPlaceholder(cleanA)) {
+                            turns += u to row.content
+                        }
                         pendingUser = null
                     }
                 }
@@ -315,6 +335,15 @@ class LlmManager(
     fun trackGeneration(job: Job) {
         generationJob?.cancel()
         generationJob = job
+    }
+
+    companion object {
+        /** Prefix LlmManager persists into the transcript on failure. */
+        private const val ERROR_PLACEHOLDER_PREFIX = "Generation failed:"
+
+        /** True for failure-placeholder rows that must never re-enter history. */
+        fun isErrorPlaceholder(cleanedContent: String): Boolean =
+            cleanedContent.startsWith(ERROR_PLACEHOLDER_PREFIX)
     }
 
     /** Cold flow variant for callers that want tokens directly. */

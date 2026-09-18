@@ -8,6 +8,7 @@ plugins {
 android {
     namespace = "com.example.slmchat"
     compileSdk = 35
+    buildToolsVersion = "35.0.0"
 
     defaultConfig {
         applicationId = "com.example.slmchat"

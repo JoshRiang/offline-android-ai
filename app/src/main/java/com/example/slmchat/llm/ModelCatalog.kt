@@ -23,6 +23,10 @@ data class ModelInfo(
     val fileName: String,
     val license: String,
     val contextLength: Int,
+/** Usable window of the shipped `.task` bundle (prompt + output), which can be
+ * smaller than the base model's native context when the bundle was converted
+ * with a capped KV cache (TinyLlama file carries the `ekv1280` suffix). */
+    val windowTokens: Int = contextLength,
     /** True if weights are access-gated and likely need a manual download. */
     val gated: Boolean = false
 )
@@ -46,7 +50,9 @@ object ModelCatalog {
             ),
             fileName = "tinyllama-1.1b-chat.task",
             license = "Apache-2.0",
-            contextLength = 2048
+            contextLength = 2048,
+            // Bundle filename carries ekv1280: usable prefill+decode window.
+            windowTokens = 1280
         ),
         ModelInfo(
             id = "qwen2-1.5b-instruct",
